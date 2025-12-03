@@ -245,12 +245,12 @@ mod tests {
 
     #[test]
     fn test_parse_loops_unmatched_loop_start() {
-        let tokens = tokenize("[<>]++]");
+        let tokens = tokenize("[<>]++[");
         let result = parse_loops(&tokens);
 
         insta::assert_debug_snapshot!(result, @r#"
         Err(
-            "Unmatched ']' at index 6",
+            "Unmatched '[' at index(es): [6]",
         )
         "#);
     }
