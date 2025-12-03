@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Token {
@@ -57,7 +57,7 @@ pub fn parse_loops(tokens: &[Token]) -> Result<JumpTable, String> {
     if loop_stack.is_empty() {
         Ok(jump_table)
     } else {
-        Err(format!("Unmatched '[' at index(es): {:?}", loop_stack))
+        Err(format!("Unmatched '[' at index {}", loop_stack[0]))
     }
 }
 
@@ -65,28 +65,31 @@ pub struct Interpreter {
     memory: Vec<u8>,
     data_pointer: usize,
     instruction_pointer: usize,
-    jump_table: JumpTable,
-    tokens: Vec<Token>,
+}
+
+impl Default for Interpreter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Interpreter {
     const MEMORY_SIZE: usize = 30000;
 
-    pub fn new(tokens: Vec<Token>, jump_table: JumpTable) -> Self {
+    pub fn new() -> Self {
         Self {
             memory: vec![0; Self::MEMORY_SIZE],
             data_pointer: Self::MEMORY_SIZE / 2,
             instruction_pointer: 0,
-            jump_table,
-            tokens,
         }
     }
 
-    pub fn run(&mut self) -> Result<(), String> {
-        let tokens_len = self.tokens.len();
+    pub fn run(&mut self, tokens: &[Token], jump_table: &JumpTable) -> Result<(), String> {
+        let tokens_len = tokens.len();
+        self.instruction_pointer = 0;
 
         while self.instruction_pointer < tokens_len {
-            let token = self.tokens[self.instruction_pointer];
+            let token = tokens[self.instruction_pointer];
 
             match token {
                 Token::IncrementPointer => {
@@ -109,21 +112,17 @@ impl Interpreter {
                 }
                 Token::Output => {
                     print!("{}", self.memory[self.data_pointer] as char);
+                    io::stdout().flush().map_err(|e| e.to_string())?;
                 }
-                Token::Input => {
-                    let mut buffer = [0u8];
-                    if io::stdin().read_exact(&mut buffer).is_ok() {
-                        self.memory[self.data_pointer] = buffer[0];
-                    } else {
-                        self.memory[self.data_pointer] = 0;
-                    }
-                }
+                Token::Input => match io::stdin().bytes().next() {
+                    Some(Ok(byte)) => self.memory[self.data_pointer] = byte,
+                    Some(Err(e)) => return Err(e.to_string()),
+                    None => self.memory[self.data_pointer] = 0,
+                },
                 Token::LoopStart => {
                     if self.memory[self.data_pointer] == 0 {
-                        self.instruction_pointer = *self
-                            .jump_table
-                            .get(&self.instruction_pointer)
-                            .ok_or_else(|| {
+                        self.instruction_pointer =
+                            *jump_table.get(&self.instruction_pointer).ok_or_else(|| {
                                 format!(
                                     "Jump table missing entry for '[' at {}",
                                     self.instruction_pointer
@@ -133,10 +132,8 @@ impl Interpreter {
                 }
                 Token::LoopEnd => {
                     if self.memory[self.data_pointer] != 0 {
-                        self.instruction_pointer = *self
-                            .jump_table
-                            .get(&self.instruction_pointer)
-                            .ok_or_else(|| {
+                        self.instruction_pointer =
+                            *jump_table.get(&self.instruction_pointer).ok_or_else(|| {
                                 format!(
                                     "Jump table missing entry for ']' at {}",
                                     self.instruction_pointer
@@ -151,41 +148,131 @@ impl Interpreter {
 
         Ok(())
     }
+
+    pub fn print_memory_snapshot(&self, range: usize) {
+        let start = self.data_pointer.saturating_sub(range);
+        let end = (self.data_pointer + range + 1).min(Self::MEMORY_SIZE);
+
+        print!("Addr:");
+        for i in start..end {
+            print!("{:>7}", i);
+        }
+        println!();
+
+        print!("Data:");
+        for i in start..end {
+            print!("{:>7}", self.memory[i]);
+        }
+        println!();
+
+        print!("Ptrs:");
+        for i in start..end {
+            if i == self.data_pointer {
+                print!("  ^^^^^");
+            } else {
+                print!("       ");
+            }
+        }
+        println!();
+    }
+}
+
+fn run_repl() -> Result<(), String> {
+    let mut interpreter = Interpreter::new();
+
+    println!("Brainfuck REPL");
+    println!("Type 'exit' to exit, or 'mem' to show memory snapshot.");
+
+    loop {
+        print!("> ");
+        io::stdout().flush().map_err(|e| e.to_string())?;
+
+        let mut input = String::new();
+
+        let bytes_read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| e.to_string())?;
+
+        if bytes_read == 0 {
+            println!();
+            break;
+        }
+
+        let bf_code = input.trim();
+
+        if bf_code.is_empty() {
+            continue;
+        }
+
+        match bf_code {
+            "quit" | "exit" => {
+                break;
+            }
+            "mem" | "memory" => {
+                interpreter.print_memory_snapshot(5);
+                continue;
+            }
+            _ => {}
+        }
+
+        let tokens = tokenize(bf_code);
+
+        if tokens.is_empty() {
+            continue;
+        }
+
+        let jump_table = match parse_loops(&tokens) {
+            Ok(jump_table) => jump_table,
+            Err(e) => {
+                eprintln!("{}", e);
+                continue;
+            }
+        };
+
+        match interpreter.run(&tokens, &jump_table) {
+            Ok(_) => {
+                println!(
+                    "Cell[DP={}] = {}",
+                    interpreter.data_pointer, interpreter.memory[interpreter.data_pointer]
+                );
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_file(filename: &str) -> Result<(), String> {
+    let bf_code =
+        fs::read_to_string(filename).map_err(|e| format!("Cannot read {}: {}", filename, e))?;
+
+    let tokens = tokenize(&bf_code);
+
+    let jump_table = parse_loops(&tokens)?;
+
+    let mut interpreter = Interpreter::new();
+
+    interpreter.run(&tokens, &jump_table)?;
+    println!();
+
+    Ok(())
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() != 2 {
-        eprintln!("Usage: {} <brainfuck_file.bf>", args[0]);
-        return;
-    }
-
-    let filename = &args[1];
-
-    let bf_code = match fs::read_to_string(filename) {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("{e}");
-            return;
-        }
+    let result = if args.len() > 1 {
+        run_file(&args[1])
+    } else {
+        run_repl()
     };
 
-    let tokens = tokenize(&bf_code);
-
-    let jump_table = match parse_loops(&tokens) {
-        Ok(table) => table,
-        Err(e) => {
-            eprintln!("{e}");
-            return;
-        }
-    };
-
-    let mut interpreter = Interpreter::new(tokens, jump_table);
-
-    match interpreter.run() {
-        Ok(_) => {}
-        Err(e) => eprintln!("{e}"),
+    if let Err(e) = result {
+        eprintln!("{}", e);
+        std::process::exit(1);
     }
 }
 
@@ -250,7 +337,7 @@ mod tests {
 
         insta::assert_debug_snapshot!(result, @r#"
         Err(
-            "Unmatched '[' at index(es): [6]",
+            "Unmatched '[' at index 6",
         )
         "#);
     }
